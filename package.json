@@ -32,3 +32,193 @@
     "@types/uuid": "^9.0.0"
   }
 }
+  tsconfig.jsonwebtoken
+  {
+  "compilerOptions": {
+    "module": "commonjs",
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2017",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "incremental": true,
+    "strict": true
+  },
+  "exclude": ["node_modules", "dist"]
+}
+main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './src/app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  await app.listen(3000);
+  console.log('Application is running on: http://localhost:3000');
+}
+bootstrap()
+app.module.ts
+import { Module } from '@nestjs/common';
+import { UserModule } from './user/user.module';
+import { VideoModule } from './video/video.module';
+import { ConfigModule } from '@nestjs/config';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot(),
+    UserModule,
+    VideoModule,
+  ],
+  controllers: [],
+  providers: [],
+})
+export class AppModule {}
+UserModule
+foreigner/src/user/
+user.module.ts
+import { Module } from '@nestjs/common';
+import { UserService } from './user.service';
+import { UserController } from './user.controller';
+
+@Module({
+  controllers: [UserController],
+  providers: [UserService],
+})
+export class UserModule {}
+user.service.
+import { Injectable } from '@nestjs/common';
+
+interface User {
+  id: string;
+  phone: string;
+  email: string;
+  isVerified: boolean;
+  verificationCode: string;
+}
+
+@Injectable()
+export class UserService {
+  private users: User[] = [];
+
+  register(phone: string, email: string, verificationCode: string): User {
+    const newUser: User = {
+      id: (Math.random() * 100000).toString(),
+      phone,
+      email,
+      isVerified: false,
+      verificationCode,
+    };
+    this.users.push(newUser);
+    return newUser;
+  }
+
+  verifyUser(phone: string, code: string): boolean {
+    const user = this.users.find((u) => u.phone === phone);
+    if (user && user.verificationCode === code) {
+      user.isVerified = true;
+      return true;
+    }
+    return false;
+  }
+
+  getAllUsers(): User[] {
+    return this.users;
+  }
+}
+user.controller.
+import { Controller, Post, Body } from '@nestjs/common';
+import { UserService } from './user.service';
+
+@Controller('user')
+export class UserController {
+  constructor(private readonly userService: UserService) {}
+
+  @Post('register')
+  register(
+    @Body('phone') phone: string,
+    @Body('email') email: string,
+    @Body('verificationCode') verificationCode: string,
+  ) {
+    const user = this.userService.register(phone, email, verificationCode);
+    return { message: 'User registered successfully', user };
+  }
+
+  @Post('verify')
+  verify(
+    @Body('phone') phone: string,
+    @Body('code') code: string,
+  ) {
+    const result = this.userService.verifyUser(phone, code);
+    if (result) {
+      return { message: 'User verified successfully' };
+    }
+    return { message: 'Invalid code or phone number' };
+  }
+}
+video
+  foreigner/src/video/
+  
+  video.module.
+  import { Module } from '@nestjs/common';
+import { VideoService } from './video.service';
+import { VideoController } from './video.controller';
+
+@Module({
+  controllers: [VideoController],
+  providers: [VideoService],
+})
+export class VideoModule {}
+video.service.ts
+import { Injectable } from '@nestjs/common';
+import { join } from 'path';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+
+@Injectable()
+export class VideoService {
+  private uploadPath = join(__dirname, '../../uploads');
+
+  constructor() {
+    if (!existsSync(this.uploadPath)) {
+      mkdirSync(this.uploadPath, { recursive: true });
+    }
+  }
+
+  saveVideo(filename: string, fileBuffer: Buffer) {
+    const filePath = join(this.uploadPath, filename);
+    writeFileSync(filePath, fileBuffer);
+    return { message: 'Video uploaded successfully', filePath };
+  }
+
+  getUploadPath(): string {
+    return this.uploadPath;
+  }
+}video.controller.
+import { Controller, Post, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { VideoService } from './video.service';
+import { extname } from 'path';
+
+@Controller('video')
+export class VideoController {
+  constructor(private readonly videoService: VideoService) {}
+
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file', {
+    storage: diskStorage({
+      destination: './uploads',
+      filename: (req, file, callback) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        const ext = extname(file.originalname);
+        callback(null, uniqueSuffix + ext);
+      },
+    }),
+  }))
+  uploadVideo(@UploadedFile() file: Express.Multer.File) {
+    return { message: 'Video uploaded successfully', filename: file.filename };
+  }
+}
+uploads
