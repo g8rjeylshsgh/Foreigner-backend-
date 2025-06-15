@@ -1,0 +1,241 @@
+import { NestFactory } from '@nestjs/core';
+import { Module, Controller, Post, Body, UploadedFile, UseInterceptors, UnauthorizedException, BadRequestException, Get, UseGuards, Req, Injectable } from '@nestjs/common';
+import { TypeOrmModule, InjectRepository } from '@nestjs/typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Repository } from 'typeorm';
+import { JwtModule, JwtService } from '@nestjs/jwt';
+import { JwtAuthGuard } from '@nestjs/passport';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+import * as bcrypt from 'bcrypt';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { v4 as uuidv4 } from 'uuid';
+import * as path from 'path';
+
+// =================== ENTITIES ====================
+
+@Entity()
+export class User {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ unique: true })
+  phoneNumber: string;
+
+  @Column({ unique: true })
+  email: string;
+
+  @Column()
+  password: string;
+
+  @Column({ nullable: true })
+  verificationCode: string;
+
+  @Column({ nullable: true })
+  codeGeneratedAt: Date;
+
+  @Column({ default: false })
+  isVerified: boolean;
+
+  @CreateDateColumn()
+  createdAt: Date;
+}
+
+@Entity()
+export class Video {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  filename: string;
+
+  @Column()
+  url: string;
+
+  @Column()
+  uploadedBy: number;
+
+  @CreateDateColumn()
+  createdAt: Date;
+}
+
+// =================== SMS SERVICE ====================
+
+@Injectable()
+export class SmsService {
+  async sendSMS(phoneNumber: string, code: string) {
+    console.log(`Sending verification code ${code} to ${phoneNumber}`);
+    // Integrate your SMS API here (Twilio, Termii, etc)
+  }
+}
+
+// =================== AUTH SERVICE ====================
+
+@Injectable()
+export class AuthService {
+  constructor(
+    @InjectRepository(User) private userRepo: Repository<User>,
+    private jwtService: JwtService,
+    private smsService: SmsService
+  ) {}
+
+  private generateCode(): string {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  }
+
+  async register(phoneNumber: string, email: string, password: string) {
+    const existPhone = await this.userRepo.findOne({ where: { phoneNumber } });
+    const existEmail = await this.userRepo.findOne({ where: { email } });
+    if (existPhone || existEmail) throw new BadRequestException('Phone or email already registered.');
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const code = this.generateCode();
+
+    const user = this.userRepo.create({
+      phoneNumber,
+      email,
+      password: hashedPassword,
+      verificationCode: code,
+      codeGeneratedAt: new Date(),
+    });
+
+    await this.userRepo.save(user);
+    await this.smsService.sendSMS(phoneNumber, code);
+
+    return { message: 'Verification code sent' };
+  }
+
+  async verify(phoneNumber: string, code: string) {
+    const user = await this.userRepo.findOne({ where: { phoneNumber } });
+    if (!user || user.verificationCode !== code) throw new UnauthorizedException('Invalid code');
+    user.isVerified = true;
+    user.verificationCode = null;
+    user.codeGeneratedAt = null;
+    await this.userRepo.save(user);
+    const token = this.jwtService.sign({ id: user.id, phoneNumber: user.phoneNumber });
+    return { token };
+  }
+
+  async login(email: string, password: string) {
+    const user = await this.userRepo.findOne({ where: { email } });
+    if (!user) throw new UnauthorizedException('Invalid credentials');
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) throw new UnauthorizedException('Invalid credentials');
+    const token = this.jwtService.sign({ id: user.id, phoneNumber: user.phoneNumber });
+    return { token };
+  }
+}
+
+// =================== VIDEO SERVICE ====================
+
+@Injectable()
+export class VideoService {
+  constructor(@InjectRepository(Video) private videoRepo: Repository<Video>) {}
+
+  async saveVideo(filename: string, url: string, uploadedBy: number) {
+    const video = this.videoRepo.create({ filename, url, uploadedBy });
+    await this.videoRepo.save(video);
+  }
+
+  async getAllVideos() {
+    return this.videoRepo.find();
+  }
+}
+
+// =================== JWT STRATEGY ====================
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor() {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      secretOrKey: 'secretKey123',
+    });
+  }
+
+  async validate(payload: any) {
+    return { userId: payload.id, phoneNumber: payload.phoneNumber };
+  }
+}
+
+// =================== CONTROLLERS ====================
+
+@Controller('auth')
+export class AuthController {
+  constructor(private authService: AuthService) {}
+
+  @Post('register')
+  register(@Body() body: { phoneNumber: string, email: string, password: string }) {
+    return this.authService.register(body.phoneNumber, body.email, body.password);
+  }
+
+  @Post('verify')
+  verify(@Body() body: { phoneNumber: string, code: string }) {
+    return this.authService.verify(body.phoneNumber, body.code);
+  }
+
+  @Post('login')
+  login(@Body() body: { email: string, password: string }) {
+    return this.authService.login(body.email, body.password);
+  }
+}
+
+@Controller('video')
+@UseGuards(JwtAuthGuard)
+export class VideoController {
+  constructor(private videoService: VideoService) {}
+
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file', {
+    storage: diskStorage({
+      destination: './uploads',
+      filename: (req, file, cb) => {
+        const filename = `${uuidv4()}${path.extname(file.originalname)}`;
+        cb(null, filename);
+      }
+    }),
+  }))
+  async uploadVideo(@UploadedFile() file: Express.Multer.File, @Req() req: any) {
+    const url = `uploads/${file.filename}`;
+    await this.videoService.saveVideo(file.filename, url, req.user.userId);
+    return { message: 'Video uploaded successfully' };
+  }
+
+  @Get()
+  async getAllVideos() {
+    return this.videoService.getAllVideos();
+  }
+}
+
+// =================== MODULE ====================
+
+@Module({
+  imports: [
+    TypeOrmModule.forRoot({
+      type: 'postgres',
+      host: 'localhost',
+      port: 5432,
+      username: 'postgres',
+      password: 'yourpassword',
+      database: 'yourdbname',
+      entities: [User, Video],
+      synchronize: true,
+    }),
+    TypeOrmModule.forFeature([User, Video]),
+    JwtModule.register({
+      secret: 'secretKey123',
+      signOptions: { expiresIn: '30d' },
+    }),
+  ],
+  controllers: [AuthController, VideoController],
+  providers: [AuthService, SmsService, VideoService, JwtStrategy],
+})
+export class AppModule {}
+
+// =================== BOOTSTRAP ====================
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  await app.listen(3000);
+}
+bootstrap();
